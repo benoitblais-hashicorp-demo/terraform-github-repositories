@@ -97,8 +97,8 @@ jobs:
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status response for ${test_id}:"
             echo "${response}" | jq '.'
             
-            local status=$(echo "${response}" | jq -r '.data.attributes.status')
-            echo "$status"
+            status=$(echo "${response}" | jq -r '.data.attributes.status')
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status response for ${test_id}: ${status}"
           }
 
           # Function to wait for test completion
