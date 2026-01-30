@@ -63,13 +63,36 @@ jobs:
           COMMIT_MESSAGE: ${{ steps.commit.outputs.message }}
           COMMIT_SHA: ${{ steps.commit.outputs.sha }}
         run: |
+          # Parse repository name to extract module information
+          # Repository follows terraform naming convention: terraform-<provider>-<name>
+          # For private registry, namespace is the same as organization
+          
+          # Extract provider and name from repository name
+          # Format: terraform-<provider>-<name> (e.g., terraform-github-repositories)
+          MODULE_NAMESPACE="${TF_CLOUD_ORGANIZATION}"
+          
+          # Remove 'terraform-' prefix to get '<provider>-<name>'
+          TEMP="${REPO_NAME#terraform-}"
+          
+          # Extract provider (first part after terraform-)
+          MODULE_PROVIDER="${TEMP%%-*}"
+          
+          # Extract name (everything after the provider)
+          MODULE_NAME="${TEMP#*-}"
+          
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Parsed module details from repository name:"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Repository: ${REPO_NAME}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Namespace: ${MODULE_NAMESPACE}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Provider: ${MODULE_PROVIDER}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Name: ${MODULE_NAME}"
+          
           # Function to check test status
           check_test_status() {
             local test_id=$1
             local status=$(curl -s \
               --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
               --header "Content-Type: application/vnd.api+json" \
-              "https://app.terraform.io/api/v2/test-results/${test_id}" | jq -r '.data.attributes.status')
+              "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${test_id}" | jq -r '.data.attributes.status')
             echo "$status"
           }
 
@@ -106,33 +129,29 @@ jobs:
             return 1
           }
 
-          # Get module ID by repository name
-          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Searching for module: ${REPO_NAME}"
+          # Get test results for the module using the correct API endpoint
+          TEST_RESULTS_URL="https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs?page%5Bsize%5D=20"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Calling test results API: ${TEST_RESULTS_URL}"
           
-          MODULE_RESPONSE=$(curl -s \
+          TEST_RESULTS=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
             --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
             --header "Content-Type: application/vnd.api+json" \
-            "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/registry-modules?filter%5Bmodule_name%5D=${REPO_NAME}")
+            "${TEST_RESULTS_URL}")
           
-          MODULE_ID=$(echo "${MODULE_RESPONSE}" | jq -r '.data[0].id // empty')
+          HTTP_STATUS=$(echo "${TEST_RESULTS}" | grep "HTTP_STATUS:" | cut -d: -f2)
+          TEST_RESULTS=$(echo "${TEST_RESULTS}" | sed '/HTTP_STATUS:/d')
           
-          if [ -z "${MODULE_ID}" ]; then
-            echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | No module found matching repository name: ${REPO_NAME}"
-            echo "status=not_found" >> "$GITHUB_OUTPUT"
-            echo "message=No module found matching repository name: ${REPO_NAME}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          
-          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Found module ID: ${MODULE_ID}"
-          
-          # Get test results for the module
-          TEST_RESULTS=$(curl -s \
-            --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
-            --header "Content-Type: application/vnd.api+json" \
-            "https://app.terraform.io/api/v2/registry-modules/${MODULE_ID}/test-results?page%5Bsize%5D=20")
-          
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | HTTP Status: ${HTTP_STATUS}"
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test results response:"
           echo "${TEST_RESULTS}" | jq '.'
+          
+          # Check for 404 error
+          if [ "${HTTP_STATUS}" == "404" ]; then
+            echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test results endpoint returned 404 - module may not exist in private registry"
+            echo "status=not_found" >> "$GITHUB_OUTPUT"
+            echo "message=Module not found in private registry: ${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           
           # Check if data exists
           HAS_DATA=$(echo "${TEST_RESULTS}" | jq -r '.data // empty | length')
@@ -169,7 +188,7 @@ jobs:
             TEST_DETAILS=$(curl -s \
               --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
               --header "Content-Type: application/vnd.api+json" \
-              "https://app.terraform.io/api/v2/test-results/${TEST_ID}")
+              "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${TEST_ID}")
             
             STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status // "unknown"')
             MESSAGE=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.message // "No message"')
