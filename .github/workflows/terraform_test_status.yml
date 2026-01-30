@@ -1,0 +1,267 @@
+# This workflow runs on `pull_request`.
+#
+# `Terraform Test Status` job retrieves Terraform module test results from HCP Terraform that match
+# the repository name. It finds the most recent test with the name of the last commit to the pull request,
+# waits for it to complete, and posts the test status as a comment on the pull request.
+#
+# Documentation
+# - https://developer.hashicorp.com/terraform/cloud-docs/api-docs/modules
+# - https://developer.hashicorp.com/terraform/cloud-docs/api-docs/test-results
+
+name: Terraform Test Status
+
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+    branches:
+      - '*'                      # matches every branch that doesn't contain a '/'
+      - '*/*'                    # matches every branch containing a single '/'
+      - '**'                     # matches every branch
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform-test-status:
+    name: Terraform Test Status
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TF_CLOUD_TOKEN: ${{ secrets.TFE_TOKEN }}
+      TF_CLOUD_ORGANIZATION: benoitblais-hashicorp
+    steps:
+
+      - name: Branch
+        id: branch
+        run: echo "branch=${GITHUB_HEAD_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+
+      - name: Get Last Commit Message
+        id: commit
+        run: |
+          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          echo "message=${COMMIT_MESSAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Get Repository Name
+        id: repo
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          echo "name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Get Test Results
+        id: test
+        run: |
+          # Function to check test status
+          check_test_status() {
+            local test_id=$1
+            local status=$(curl -s \
+              --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
+              --header "Content-Type: application/vnd.api+json" \
+              "https://app.terraform.io/api/v2/test-results/${test_id}" | jq -r '.data.attributes.status')
+            echo "$status"
+          }
+
+          # Function to wait for test completion
+          wait_for_test() {
+            local test_id=$1
+            local max_attempts=60
+            local attempt=0
+            
+            echo "Waiting for test ${test_id} to complete..."
+            
+            while [ $attempt -lt $max_attempts ]; do
+              status=$(check_test_status "$test_id")
+              
+              case "$status" in
+                "passed"|"failed"|"errored"|"canceled")
+                  echo "Test completed with status: ${status}"
+                  return 0
+                  ;;
+                "pending"|"running")
+                  echo "Test is ${status}... (attempt $((attempt + 1))/${max_attempts})"
+                  sleep 10
+                  ;;
+                *)
+                  echo "Unknown status: ${status}"
+                  sleep 10
+                  ;;
+              esac
+              
+              attempt=$((attempt + 1))
+            done
+            
+            echo "Test did not complete within timeout period"
+            return 1
+          }
+
+          # Get module ID by repository name
+          echo "Searching for module: ${REPO_NAME}"
+          
+          MODULE_RESPONSE=$(curl -s \
+            --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/registry-modules?filter%5Bmodule_name%5D=${{ steps.repo.outputs.name }}")
+          
+          MODULE_ID=$(echo "${MODULE_RESPONSE}" | jq -r '.data[0].id // empty')
+          
+          if [ -z "${MODULE_ID}" ]; then
+            echo "status=not_found" >> "$GITHUB_OUTPUT"
+            echo "message=No module found matching repository name: ${{ steps.repo.outputs.name }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          
+          echo "Found module ID: ${MODULE_ID}"
+          
+          # Get test results for the module
+          TEST_RESULTS=$(curl -s \
+            --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/registry-modules/${MODULE_ID}/test-results?page%5Bsize%5D=20")
+          
+          # Find the most recent test matching the commit message
+          TEST_ID=$(echo "${TEST_RESULTS}" | jq -r --arg commit "${{ steps.commit.message }}" \
+            '.data[] | select(.attributes.message == $commit) | .id' | head -n 1)
+          
+          if [ -z "${TEST_ID}" ]; then
+            # If no exact match, get the most recent test
+            TEST_ID=$(echo "${TEST_RESULTS}" | jq -r '.data[0].id // empty')
+          fi
+          
+          if [ -z "${TEST_ID}" ]; then
+            echo "status=no_tests" >> "$GITHUB_OUTPUT"
+            echo "message=No test results found for module: ${{ steps.repo.outputs.name }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          
+          echo "Found test ID: ${TEST_ID}"
+          echo "test_id=${TEST_ID}" >> "$GITHUB_OUTPUT"
+          
+          # Wait for test to complete
+          if wait_for_test "${TEST_ID}"; then
+            # Get detailed test results
+            TEST_DETAILS=$(curl -s \
+              --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
+              --header "Content-Type: application/vnd.api+json" \
+              "https://app.terraform.io/api/v2/test-results/${TEST_ID}")
+            
+            STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status')
+            MESSAGE=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.message // "No message"')
+            CREATED_AT=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["created-at"]')
+            
+            echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+            echo "message=${MESSAGE}" >> "$GITHUB_OUTPUT"
+            echo "created_at=${CREATED_AT}" >> "$GITHUB_OUTPUT"
+            
+            # Get test run details if available
+            RUNS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | length')
+            PASSED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | map(select(.status == "passed")) | length')
+            FAILED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | map(select(.status == "failed")) | length')
+            
+            echo "total_runs=${RUNS}" >> "$GITHUB_OUTPUT"
+            echo "passed_runs=${PASSED}" >> "$GITHUB_OUTPUT"
+            echo "failed_runs=${FAILED}" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=timeout" >> "$GITHUB_OUTPUT"
+            echo "message=Test did not complete within the timeout period" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR Comment
+        if: steps.test.outputs.status != 'not_found' && steps.test.outputs.status != 'no_tests'
+        run: |
+          # Determine emoji and color based on status
+          case "${{ steps.test.outputs.status }}" in
+            "passed")
+              EMOJI="✅"
+              STATUS_TEXT="PASSED"
+              COLOR="green"
+              ;;
+            "failed")
+              EMOJI="❌"
+              STATUS_TEXT="FAILED"
+              COLOR="red"
+              ;;
+            "errored")
+              EMOJI="⚠️"
+              STATUS_TEXT="ERRORED"
+              COLOR="orange"
+              ;;
+            "canceled")
+              EMOJI="🚫"
+              STATUS_TEXT="CANCELED"
+              COLOR="gray"
+              ;;
+            "timeout")
+              EMOJI="⏱️"
+              STATUS_TEXT="TIMEOUT"
+              COLOR="yellow"
+              ;;
+            *)
+              EMOJI="ℹ️"
+              STATUS_TEXT="${{ steps.test.outputs.status }}"
+              COLOR="blue"
+              ;;
+          esac
+          
+          # Build comment body
+          COMMENT_BODY="### ${EMOJI} Terraform Test Status: ${STATUS_TEXT}
+
+          **Module:** \`${{ steps.repo.outputs.name }}\`
+          **Test ID:** \`${{ steps.test.outputs.test_id }}\`
+          **Commit:** \`${{ steps.commit.sha }}\`
+          **Message:** ${{ steps.test.outputs.message }}
+          **Created:** ${{ steps.test.outputs.created_at }}
+          "
+          
+          # Add test run statistics if available
+          if [ -n "${{ steps.test.outputs.total_runs }}" ] && [ "${{ steps.test.outputs.total_runs }}" != "0" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+
+          **Test Results:**
+          - Total Runs: ${{ steps.test.outputs.total_runs }}
+          - Passed: ${{ steps.test.outputs.passed_runs }}
+          - Failed: ${{ steps.test.outputs.failed_runs }}
+          "
+          fi
+          
+          # Add link to HCP Terraform
+          COMMENT_BODY="${COMMENT_BODY}
+
+          [View in HCP Terraform](https://app.terraform.io/app/${TF_CLOUD_ORGANIZATION}/registry/modules/private/${TF_CLOUD_ORGANIZATION}/${{ steps.repo.outputs.name }}/tests)
+          "
+          
+          # Post comment to PR
+          PR_COMMENTS_URL=$(jq -r ".pull_request.comments_url" "${GITHUB_EVENT_PATH}")
+          
+          curl -s -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg body "${COMMENT_BODY}" '{body: $body}')" \
+            "${PR_COMMENTS_URL}"
+
+      - name: Create PR Comment - No Tests Found
+        if: steps.test.outputs.status == 'not_found' || steps.test.outputs.status == 'no_tests'
+        run: |
+          COMMENT_BODY="### ℹ️ Terraform Test Status
+
+          ${{ steps.test.outputs.message }}
+          
+          **Repository:** \`${{ steps.repo.outputs.name }}\`
+          **Organization:** \`${TF_CLOUD_ORGANIZATION}\`
+          
+          No test results were found for this module. Make sure the module is published to the private registry and has test runs configured.
+          "
+          
+          PR_COMMENTS_URL=$(jq -r ".pull_request.comments_url" "${GITHUB_EVENT_PATH}")
+          
+          curl -s -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg body "${COMMENT_BODY}" '{body: $body}')" \
+            "${PR_COMMENTS_URL}"
