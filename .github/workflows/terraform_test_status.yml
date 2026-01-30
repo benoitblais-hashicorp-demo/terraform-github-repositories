@@ -131,13 +131,26 @@ jobs:
             --header "Content-Type: application/vnd.api+json" \
             "https://app.terraform.io/api/v2/registry-modules/${MODULE_ID}/test-results?page%5Bsize%5D=20")
           
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test results response:"
+          echo "${TEST_RESULTS}" | jq '.'
+          
+          # Check if data exists
+          HAS_DATA=$(echo "${TEST_RESULTS}" | jq -r '.data // empty | length')
+          
+          if [ -z "${HAS_DATA}" ] || [ "${HAS_DATA}" == "0" ]; then
+            echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | No test results found for module: ${REPO_NAME}"
+            echo "status=no_tests" >> "$GITHUB_OUTPUT"
+            echo "message=No test results found for module: ${REPO_NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          
           # Find the most recent test matching the commit message
           TEST_ID=$(echo "${TEST_RESULTS}" | jq -r --arg commit "${COMMIT_MESSAGE}" \
-            '.data[] | select(.attributes.message == $commit) | .id' | head -n 1)
+            '(.data // []) | .[] | select(.attributes.message == $commit) | .id' | head -n 1)
           
           if [ -z "${TEST_ID}" ]; then
             # If no exact match, get the most recent test
-            TEST_ID=$(echo "${TEST_RESULTS}" | jq -r '.data[0].id // empty')
+            TEST_ID=$(echo "${TEST_RESULTS}" | jq -r '(.data // [])[0].id // empty')
           fi
           
           if [ -z "${TEST_ID}" ]; then
@@ -158,9 +171,9 @@ jobs:
               --header "Content-Type: application/vnd.api+json" \
               "https://app.terraform.io/api/v2/test-results/${TEST_ID}")
             
-            STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status')
+            STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status // "unknown"')
             MESSAGE=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.message // "No message"')
-            CREATED_AT=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["created-at"]')
+            CREATED_AT=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["created-at"] // ""')
             
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status: ${STATUS}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test message: ${MESSAGE}"
@@ -170,9 +183,9 @@ jobs:
             echo "created_at=${CREATED_AT}" >> "$GITHUB_OUTPUT"
             
             # Get test run details if available
-            RUNS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | length')
-            PASSED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | map(select(.status == "passed")) | length')
-            FAILED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | map(select(.status == "failed")) | length')
+            RUNS=$(echo "${TEST_DETAILS}" | jq -r '(.data.attributes["test-runs"] // []) | length')
+            PASSED=$(echo "${TEST_DETAILS}" | jq -r '(.data.attributes["test-runs"] // []) | map(select(.status == "passed")) | length')
+            FAILED=$(echo "${TEST_DETAILS}" | jq -r '(.data.attributes["test-runs"] // []) | map(select(.status == "failed")) | length')
             
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test runs - Total: ${RUNS}, Passed: ${PASSED}, Failed: ${FAILED}"
             echo "total_runs=${RUNS}" >> "$GITHUB_OUTPUT"
