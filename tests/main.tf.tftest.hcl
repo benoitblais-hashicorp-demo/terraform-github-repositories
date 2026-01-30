@@ -2,8 +2,6 @@ provider "github" {
   app_auth {} # Required when using `GITHUB_APP_XXX` environment variables
 }
 
-provider "tfe" {}
-
 run "main_failed_security_and_analysis" {
 
   command = plan
