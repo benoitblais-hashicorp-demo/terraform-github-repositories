@@ -189,4 +189,3 @@ resource "github_team_repository" "this" {
   team_id    = data.github_team.this[each.value.name].id
   permission = each.value.permission
 }
-
