@@ -66,26 +66,26 @@ jobs:
           # Parse repository name to extract module information
           # Repository follows terraform naming convention: terraform-<provider>-<name>
           # For private registry, namespace is the same as organization
-          
+
           # Extract provider and name from repository name
           # Format: terraform-<provider>-<name> (e.g., terraform-github-repositories)
           MODULE_NAMESPACE="${TF_CLOUD_ORGANIZATION}"
-          
+
           # Remove 'terraform-' prefix to get '<provider>-<name>'
           TEMP="${REPO_NAME#terraform-}"
-          
+
           # Extract provider (first part after terraform-)
           MODULE_PROVIDER="${TEMP%%-*}"
-          
+
           # Extract name (everything after the provider)
           MODULE_NAME="${TEMP#*-}"
-          
+
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Parsed module details from repository name."
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Repository: ${REPO_NAME}"
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Namespace: ${MODULE_NAMESPACE}"
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Provider: ${MODULE_PROVIDER}"
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Name: ${MODULE_NAME}"
-          
+
           # Function to check test status
           check_test_status() {
             local test_id=$1
@@ -104,12 +104,12 @@ jobs:
             local test_id=$1
             local max_attempts=60
             local attempt=0
-            
+
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Waiting for test ${test_id} to complete..."
-            
+
             while [ $attempt -lt $max_attempts ]; do
               status=$(check_test_status "$test_id")
-              
+
               case "$status" in
                 "finished")
                   echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test completed with status: ${status}"
@@ -128,62 +128,68 @@ jobs:
                   sleep 10
                   ;;
               esac
-              
+
               attempt=$((attempt + 1))
             done
-            
+
             echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test did not complete within timeout period"
             return 1
           }
 
           # Get test results for the module using the correct API endpoint
           TEST_RESULTS_URL="https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs?page%5Bsize%5D=20"
-          
+
           TEST_RESULTS=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
             --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
             --header "Content-Type: application/vnd.api+json" \
             "${TEST_RESULTS_URL}")
-          
+
           HTTP_STATUS=$(echo "${TEST_RESULTS}" | grep "HTTP_STATUS:" | cut -d: -f2)
           TEST_RESULTS=$(echo "${TEST_RESULTS}" | sed '/HTTP_STATUS:/d')
-          
+
           # Check for 404 error
           if [ "${HTTP_STATUS}" == "404" ]; then
             echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test results endpoint returned 404 - module may not exist in private registry"
-            echo "status=not_found" >> "$GITHUB_OUTPUT"
-            echo "message=Module not found in private registry: ${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}" >> "$GITHUB_OUTPUT"
+            {
+              echo "status=not_found"
+              echo "message=Module not found in private registry: ${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
+
           # Check if data exists
           HAS_DATA=$(echo "${TEST_RESULTS}" | jq -r '.data // empty | length')
-          
+
           if [ -z "${HAS_DATA}" ] || [ "${HAS_DATA}" == "0" ]; then
             echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | No test results found for module: ${REPO_NAME}"
-            echo "status=no_tests" >> "$GITHUB_OUTPUT"
-            echo "message=No test results found for module: ${REPO_NAME}" >> "$GITHUB_OUTPUT"
+            {
+              echo "status=no_tests"
+              echo "message=No test results found for module: ${REPO_NAME}"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
+
           # Find the most recent test matching the commit message
           TEST_ID=$(echo "${TEST_RESULTS}" | jq -r --arg commit "${COMMIT_MESSAGE}" \
             '(.data // []) | .[] | select(.attributes.message == $commit) | .id' | head -n 1)
-          
+
           if [ -z "${TEST_ID}" ]; then
             # If no exact match, get the most recent test
             TEST_ID=$(echo "${TEST_RESULTS}" | jq -r '(.data // [])[0].id // empty')
           fi
-          
+
           if [ -z "${TEST_ID}" ]; then
             echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | No test results found for module: ${REPO_NAME}"
-            echo "status=no_tests" >> "$GITHUB_OUTPUT"
-            echo "message=No test results found for module: ${REPO_NAME}" >> "$GITHUB_OUTPUT"
+            {
+              echo "status=no_tests"
+              echo "message=No test results found for module: ${REPO_NAME}"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
+
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Found test ID: ${TEST_ID}"
           echo "test_id=${TEST_ID}" >> "$GITHUB_OUTPUT"
-          
+
           # Wait for test to complete
           if wait_for_test "${TEST_ID}"; then
             # Get detailed test results
@@ -191,38 +197,42 @@ jobs:
               --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
               --header "Content-Type: application/vnd.api+json" \
               "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${TEST_ID}")
-            
+
             RUN_STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status // "unknown"')
             TEST_STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-status"] // "unknown"')
             MESSAGE=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.message // "No message"')
             CREATED_AT=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["created-at"] // ""')
-            
+
             # Get detailed test counts
             TESTS_PASSED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-passed"] // 0')
             TESTS_FAILED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-failed"] // 0')
             TESTS_ERRORED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-errored"] // 0')
             TESTS_SKIPPED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-skipped"] // 0')
             TESTS_TOTAL=$((TESTS_PASSED + TESTS_FAILED + TESTS_ERRORED + TESTS_SKIPPED))
-            
+
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Run status: ${RUN_STATUS}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status: ${TEST_STATUS}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test message: ${MESSAGE}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test created at: ${CREATED_AT}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test counts - Total: ${TESTS_TOTAL}, Passed: ${TESTS_PASSED}, Failed: ${TESTS_FAILED}, Errored: ${TESTS_ERRORED}, Skipped: ${TESTS_SKIPPED}"
-            
-            echo "status=${TEST_STATUS}" >> "$GITHUB_OUTPUT"
-            echo "run_status=${RUN_STATUS}" >> "$GITHUB_OUTPUT"
-            echo "message=${MESSAGE}" >> "$GITHUB_OUTPUT"
-            echo "created_at=${CREATED_AT}" >> "$GITHUB_OUTPUT"
-            echo "tests_total=${TESTS_TOTAL}" >> "$GITHUB_OUTPUT"
-            echo "tests_passed=${TESTS_PASSED}" >> "$GITHUB_OUTPUT"
-            echo "tests_failed=${TESTS_FAILED}" >> "$GITHUB_OUTPUT"
-            echo "tests_errored=${TESTS_ERRORED}" >> "$GITHUB_OUTPUT"
-            echo "tests_skipped=${TESTS_SKIPPED}" >> "$GITHUB_OUTPUT"
+
+            {
+              echo "status=${TEST_STATUS}"
+              echo "run_status=${RUN_STATUS}"
+              echo "message=${MESSAGE}"
+              echo "created_at=${CREATED_AT}"
+              echo "tests_total=${TESTS_TOTAL}"
+              echo "tests_passed=${TESTS_PASSED}"
+              echo "tests_failed=${TESTS_FAILED}"
+              echo "tests_errored=${TESTS_ERRORED}"
+              echo "tests_skipped=${TESTS_SKIPPED}"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test timeout"
-            echo "status=timeout" >> "$GITHUB_OUTPUT"
-            echo "message=Test did not complete within the timeout period" >> "$GITHUB_OUTPUT"
+            {
+              echo "status=timeout"
+              echo "message=Test did not complete within the timeout period"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create PR Comment
@@ -251,7 +261,7 @@ jobs:
               COLOR="blue"
               ;;
           esac
-          
+
           # Build comment body with test results table
           COMMENT_BODY="### ${EMOJI} Terraform Test Status: ${STATUS_TEXT}
 
@@ -271,21 +281,21 @@ jobs:
           | ❌ Failed | ${{ steps.test.outputs.tests_failed }} |
           | ⚠️ Errored | ${{ steps.test.outputs.tests_errored }} |
           | ⏭️ Skipped | ${{ steps.test.outputs.tests_skipped }} |
-          
+
           [View in HCP Terraform](https://app.terraform.io/app/${TF_CLOUD_ORGANIZATION}/registry/modules/private/${TF_CLOUD_ORGANIZATION}/${{ steps.repo.outputs.name }}/tests)
           "
-          
+
           # Post comment to PR
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Posting test results comment to PR"
           PR_COMMENTS_URL=$(jq -r ".pull_request.comments_url" "${GITHUB_EVENT_PATH}")
-          
+
           curl -s -X POST \
             -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg body "${COMMENT_BODY}" '{body: $body}')" \
             "${PR_COMMENTS_URL}"
-          
+
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Comment posted successfully"
 
       - name: Create PR Comment - No Tests Found
@@ -294,21 +304,21 @@ jobs:
           COMMENT_BODY="### ℹ️ Terraform Test Status
 
           ${{ steps.test.outputs.message }}
-          
+
           **Repository:** \`${{ steps.repo.outputs.name }}\`
           **Organization:** \`${TF_CLOUD_ORGANIZATION}\`
-          
+
           No test results were found for this module. Make sure the module is published to the private registry and has test runs configured.
           "
-          
+
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Posting no tests found comment to PR"
           PR_COMMENTS_URL=$(jq -r ".pull_request.comments_url" "${GITHUB_EVENT_PATH}")
-          
+
           curl -s -X POST \
             -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg body "${COMMENT_BODY}" '{body: $body}')" \
             "${PR_COMMENTS_URL}"
-          
+
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Comment posted successfully"
