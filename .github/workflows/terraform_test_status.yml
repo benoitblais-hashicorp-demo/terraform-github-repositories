@@ -80,7 +80,7 @@ jobs:
           # Extract name (everything after the provider)
           MODULE_NAME="${TEMP#*-}"
           
-          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Parsed module details from repository name:"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Parsed module details from repository name."
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Repository: ${REPO_NAME}"
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Namespace: ${MODULE_NAMESPACE}"
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Provider: ${MODULE_PROVIDER}"
@@ -94,11 +94,13 @@ jobs:
               --header "Content-Type: application/vnd.api+json" \
               "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${test_id}")
             
-            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status response for ${test_id}:"
-            echo "${response}" | jq '.'
+            # Output debug info to stderr so it doesn't interfere with return value
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status response for ${test_id}:" >&2
+            echo "${response}" | jq '.' >&2
             
-            status=$(echo "${response}" | jq -r '.data.attributes.status')
-            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status response for ${test_id}: ${status}"
+            # Extract and return only the status to stdout
+            local status=$(echo "${response}" | jq -r '.data.attributes.status')
+            echo "${status}"
           }
 
           # Function to wait for test completion
@@ -140,7 +142,6 @@ jobs:
 
           # Get test results for the module using the correct API endpoint
           TEST_RESULTS_URL="https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs?page%5Bsize%5D=20"
-          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Calling test results API: ${TEST_RESULTS_URL}"
           
           TEST_RESULTS=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
             --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
@@ -149,8 +150,6 @@ jobs:
           
           HTTP_STATUS=$(echo "${TEST_RESULTS}" | grep "HTTP_STATUS:" | cut -d: -f2)
           TEST_RESULTS=$(echo "${TEST_RESULTS}" | sed '/HTTP_STATUS:/d')
-          
-          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | HTTP Status: ${HTTP_STATUS}"
           
           # Check for 404 error
           if [ "${HTTP_STATUS}" == "404" ]; then
