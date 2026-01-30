@@ -89,10 +89,15 @@ jobs:
           # Function to check test status
           check_test_status() {
             local test_id=$1
-            local status=$(curl -s \
+            local response=$(curl -s \
               --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
               --header "Content-Type: application/vnd.api+json" \
-              "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${test_id}" | jq -r '.data.attributes.status')
+              "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${test_id}")
+            
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status response for ${test_id}:"
+            echo "${response}" | jq '.'
+            
+            local status=$(echo "${response}" | jq -r '.data.attributes.status')
             echo "$status"
           }
 
@@ -108,13 +113,17 @@ jobs:
               status=$(check_test_status "$test_id")
               
               case "$status" in
-                "passed"|"failed"|"errored"|"canceled")
+                "finished")
                   echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test completed with status: ${status}"
                   return 0
                   ;;
-                "pending"|"running")
+                "pending"|"queued"|"running")
                   echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test is ${status}... (attempt $((attempt + 1))/${max_attempts})"
                   sleep 10
+                  ;;
+                "errored"|"canceled")
+                  echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test ended with status: ${status}"
+                  return 0
                   ;;
                 *)
                   echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Unknown status: ${status}"
@@ -142,8 +151,6 @@ jobs:
           TEST_RESULTS=$(echo "${TEST_RESULTS}" | sed '/HTTP_STATUS:/d')
           
           echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | HTTP Status: ${HTTP_STATUS}"
-          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test results response:"
-          echo "${TEST_RESULTS}" | jq '.'
           
           # Check for 404 error
           if [ "${HTTP_STATUS}" == "404" ]; then
@@ -190,26 +197,36 @@ jobs:
               --header "Content-Type: application/vnd.api+json" \
               "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${TEST_ID}")
             
-            STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status // "unknown"')
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Detailed test results response:"
+            echo "${TEST_DETAILS}" | jq '.'
+            
+            RUN_STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.status // "unknown"')
+            TEST_STATUS=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-status"] // "unknown"')
             MESSAGE=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.message // "No message"')
             CREATED_AT=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["created-at"] // ""')
             
-            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status: ${STATUS}"
+            # Get detailed test counts
+            TESTS_PASSED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-passed"] // 0')
+            TESTS_FAILED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-failed"] // 0')
+            TESTS_ERRORED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-errored"] // 0')
+            TESTS_SKIPPED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["tests-skipped"] // 0')
+            TESTS_TOTAL=$((TESTS_PASSED + TESTS_FAILED + TESTS_ERRORED + TESTS_SKIPPED))
+            
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Run status: ${RUN_STATUS}"
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status: ${TEST_STATUS}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test message: ${MESSAGE}"
             echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test created at: ${CREATED_AT}"
-            echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test counts - Total: ${TESTS_TOTAL}, Passed: ${TESTS_PASSED}, Failed: ${TESTS_FAILED}, Errored: ${TESTS_ERRORED}, Skipped: ${TESTS_SKIPPED}"
+            
+            echo "status=${TEST_STATUS}" >> "$GITHUB_OUTPUT"
+            echo "run_status=${RUN_STATUS}" >> "$GITHUB_OUTPUT"
             echo "message=${MESSAGE}" >> "$GITHUB_OUTPUT"
             echo "created_at=${CREATED_AT}" >> "$GITHUB_OUTPUT"
-            
-            # Get test run details if available
-            RUNS=$(echo "${TEST_DETAILS}" | jq -r '(.data.attributes["test-runs"] // []) | length')
-            PASSED=$(echo "${TEST_DETAILS}" | jq -r '(.data.attributes["test-runs"] // []) | map(select(.status == "passed")) | length')
-            FAILED=$(echo "${TEST_DETAILS}" | jq -r '(.data.attributes["test-runs"] // []) | map(select(.status == "failed")) | length')
-            
-            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test runs - Total: ${RUNS}, Passed: ${PASSED}, Failed: ${FAILED}"
-            echo "total_runs=${RUNS}" >> "$GITHUB_OUTPUT"
-            echo "passed_runs=${PASSED}" >> "$GITHUB_OUTPUT"
-            echo "failed_runs=${FAILED}" >> "$GITHUB_OUTPUT"
+            echo "tests_total=${TESTS_TOTAL}" >> "$GITHUB_OUTPUT"
+            echo "tests_passed=${TESTS_PASSED}" >> "$GITHUB_OUTPUT"
+            echo "tests_failed=${TESTS_FAILED}" >> "$GITHUB_OUTPUT"
+            echo "tests_errored=${TESTS_ERRORED}" >> "$GITHUB_OUTPUT"
+            echo "tests_skipped=${TESTS_SKIPPED}" >> "$GITHUB_OUTPUT"
           else
             echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test timeout"
             echo "status=timeout" >> "$GITHUB_OUTPUT"
@@ -219,27 +236,17 @@ jobs:
       - name: Create PR Comment
         if: steps.test.outputs.status != 'not_found' && steps.test.outputs.status != 'no_tests'
         run: |
-          # Determine emoji and color based on status
+          # Determine emoji and color based on test-status (pass/fail)
           case "${{ steps.test.outputs.status }}" in
-            "passed")
+            "pass")
               EMOJI="✅"
               STATUS_TEXT="PASSED"
               COLOR="green"
               ;;
-            "failed")
+            "fail")
               EMOJI="❌"
               STATUS_TEXT="FAILED"
               COLOR="red"
-              ;;
-            "errored")
-              EMOJI="⚠️"
-              STATUS_TEXT="ERRORED"
-              COLOR="orange"
-              ;;
-            "canceled")
-              EMOJI="🚫"
-              STATUS_TEXT="CANCELED"
-              COLOR="gray"
               ;;
             "timeout")
               EMOJI="⏱️"
@@ -253,7 +260,7 @@ jobs:
               ;;
           esac
           
-          # Build comment body
+          # Build comment body with test results table
           COMMENT_BODY="### ${EMOJI} Terraform Test Status: ${STATUS_TEXT}
 
           **Module:** \`${{ steps.repo.outputs.name }}\`
@@ -261,22 +268,18 @@ jobs:
           **Commit:** \`${{ steps.commit.sha }}\`
           **Message:** ${{ steps.test.outputs.message }}
           **Created:** ${{ steps.test.outputs.created_at }}
-          "
-          
-          # Add test run statistics if available
-          if [ -n "${{ steps.test.outputs.total_runs }}" ] && [ "${{ steps.test.outputs.total_runs }}" != "0" ]; then
-            COMMENT_BODY="${COMMENT_BODY}
+          **Run Status:** ${{ steps.test.outputs.run_status }}
 
-          **Test Results:**
-          - Total Runs: ${{ steps.test.outputs.total_runs }}
-          - Passed: ${{ steps.test.outputs.passed_runs }}
-          - Failed: ${{ steps.test.outputs.failed_runs }}
-          "
-          fi
-          
-          # Add link to HCP Terraform
-          COMMENT_BODY="${COMMENT_BODY}
+          #### Test Results
 
+          | Metric | Count |
+          |--------|-------|
+          | Total Tests | ${{ steps.test.outputs.tests_total }} |
+          | ✅ Passed | ${{ steps.test.outputs.tests_passed }} |
+          | ❌ Failed | ${{ steps.test.outputs.tests_failed }} |
+          | ⚠️ Errored | ${{ steps.test.outputs.tests_errored }} |
+          | ⏭️ Skipped | ${{ steps.test.outputs.tests_skipped }} |
+          
           [View in HCP Terraform](https://app.terraform.io/app/${TF_CLOUD_ORGANIZATION}/registry/modules/private/${TF_CLOUD_ORGANIZATION}/${{ steps.repo.outputs.name }}/tests)
           "
           
