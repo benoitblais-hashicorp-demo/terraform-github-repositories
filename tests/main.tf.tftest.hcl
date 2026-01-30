@@ -84,12 +84,6 @@ run "main_passed" {
         branch = "develop"
       }
     ]
-    files = [
-      {
-        file    = "main.tf"
-        content = "# main.tf"
-      }
-    ]
   }
 
   assert {
