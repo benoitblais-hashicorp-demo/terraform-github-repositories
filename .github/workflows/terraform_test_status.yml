@@ -89,13 +89,16 @@ jobs:
           # Function to check test status
           check_test_status() {
             local test_id=$1
-            local response=$(curl -s \
+            local response
+            local status
+
+            response=$(curl -s \
               --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
               --header "Content-Type: application/vnd.api+json" \
               "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/tests/registry-modules/private/${MODULE_NAMESPACE}/${MODULE_NAME}/${MODULE_PROVIDER}/test-runs/${test_id}")
-            
+
             # Extract and return only the status
-            local status=$(echo "${response}" | jq -r '.data.attributes.status')
+            status=$(echo "${response}" | jq -r '.data.attributes.status')
             echo "${status}"
           }
 
@@ -238,27 +241,23 @@ jobs:
       - name: Create PR Comment
         if: steps.test.outputs.status != 'not_found' && steps.test.outputs.status != 'no_tests'
         run: |
-          # Determine emoji and color based on test-status (pass/fail)
+          # Determine emoji and text based on test-status (pass/fail)
           case "${{ steps.test.outputs.status }}" in
             "pass")
               EMOJI="✅"
               STATUS_TEXT="PASSED"
-              COLOR="green"
               ;;
             "fail")
               EMOJI="❌"
               STATUS_TEXT="FAILED"
-              COLOR="red"
               ;;
             "timeout")
               EMOJI="⏱️"
               STATUS_TEXT="TIMEOUT"
-              COLOR="yellow"
               ;;
             *)
               EMOJI="ℹ️"
               STATUS_TEXT="${{ steps.test.outputs.status }}"
-              COLOR="blue"
               ;;
           esac
 
@@ -267,7 +266,7 @@ jobs:
 
           **Module:** \`${{ steps.repo.outputs.name }}\`
           **Test ID:** \`${{ steps.test.outputs.test_id }}\`
-          **Commit:** \`${{ steps.commit.sha }}\`
+          **Commit:** \`${{ steps.commit.outputs.sha }}\`
           **Message:** ${{ steps.test.outputs.message }}
           **Created:** ${{ steps.test.outputs.created_at }}
           **Run Status:** ${{ steps.test.outputs.run_status }}
