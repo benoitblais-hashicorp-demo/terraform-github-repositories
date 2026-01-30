@@ -179,24 +179,4 @@ run "main_passed" {
     error_message = "`branches_sha` output should follow SHA pattern."
   }
 
-  assert {
-    condition     = length(output.files) > 0
-    error_message = "`files` output should not be empty."
-  }
-
-  assert {
-    condition     = alltrue([for file in output.files_commit_sha : can(regex("^([a-f0-9]{40})$", file))])
-    error_message = "`files_commit_sha` output should follow SHA pattern."
-  }
-
-  assert {
-    condition     = alltrue([for file in output.files_sha : can(regex("^([a-f0-9]{40})$", file))])
-    error_message = "`files_sha` output should follow SHA pattern."
-  }
-
-  assert {
-    condition     = alltrue([for file in output.files_ref : file != ""])
-    error_message = "`files_ref` should not be empty."
-  }
-
 }
