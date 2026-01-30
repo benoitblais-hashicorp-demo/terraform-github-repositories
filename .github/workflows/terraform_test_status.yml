@@ -44,6 +44,8 @@ jobs:
         id: commit
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Last commit message: ${COMMIT_MESSAGE}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Last commit SHA: $(git rev-parse HEAD)"
           echo "message=${COMMIT_MESSAGE}" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -51,10 +53,15 @@ jobs:
         id: repo
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Repository name: ${REPO_NAME}"
           echo "name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Get Test Results
         id: test
+        env:
+          REPO_NAME: ${{ steps.repo.outputs.name }}
+          COMMIT_MESSAGE: ${{ steps.commit.outputs.message }}
+          COMMIT_SHA: ${{ steps.commit.outputs.sha }}
         run: |
           # Function to check test status
           check_test_status() {
@@ -72,22 +79,22 @@ jobs:
             local max_attempts=60
             local attempt=0
             
-            echo "Waiting for test ${test_id} to complete..."
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Waiting for test ${test_id} to complete..."
             
             while [ $attempt -lt $max_attempts ]; do
               status=$(check_test_status "$test_id")
               
               case "$status" in
                 "passed"|"failed"|"errored"|"canceled")
-                  echo "Test completed with status: ${status}"
+                  echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test completed with status: ${status}"
                   return 0
                   ;;
                 "pending"|"running")
-                  echo "Test is ${status}... (attempt $((attempt + 1))/${max_attempts})"
+                  echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test is ${status}... (attempt $((attempt + 1))/${max_attempts})"
                   sleep 10
                   ;;
                 *)
-                  echo "Unknown status: ${status}"
+                  echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Unknown status: ${status}"
                   sleep 10
                   ;;
               esac
@@ -95,27 +102,28 @@ jobs:
               attempt=$((attempt + 1))
             done
             
-            echo "Test did not complete within timeout period"
+            echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test did not complete within timeout period"
             return 1
           }
 
           # Get module ID by repository name
-          echo "Searching for module: ${REPO_NAME}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Searching for module: ${REPO_NAME}"
           
           MODULE_RESPONSE=$(curl -s \
             --header "Authorization: Bearer ${TF_CLOUD_TOKEN}" \
             --header "Content-Type: application/vnd.api+json" \
-            "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/registry-modules?filter%5Bmodule_name%5D=${{ steps.repo.outputs.name }}")
+            "https://app.terraform.io/api/v2/organizations/${TF_CLOUD_ORGANIZATION}/registry-modules?filter%5Bmodule_name%5D=${REPO_NAME}")
           
           MODULE_ID=$(echo "${MODULE_RESPONSE}" | jq -r '.data[0].id // empty')
           
           if [ -z "${MODULE_ID}" ]; then
+            echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | No module found matching repository name: ${REPO_NAME}"
             echo "status=not_found" >> "$GITHUB_OUTPUT"
-            echo "message=No module found matching repository name: ${{ steps.repo.outputs.name }}" >> "$GITHUB_OUTPUT"
+            echo "message=No module found matching repository name: ${REPO_NAME}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           
-          echo "Found module ID: ${MODULE_ID}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Found module ID: ${MODULE_ID}"
           
           # Get test results for the module
           TEST_RESULTS=$(curl -s \
@@ -124,7 +132,7 @@ jobs:
             "https://app.terraform.io/api/v2/registry-modules/${MODULE_ID}/test-results?page%5Bsize%5D=20")
           
           # Find the most recent test matching the commit message
-          TEST_ID=$(echo "${TEST_RESULTS}" | jq -r --arg commit "${{ steps.commit.message }}" \
+          TEST_ID=$(echo "${TEST_RESULTS}" | jq -r --arg commit "${COMMIT_MESSAGE}" \
             '.data[] | select(.attributes.message == $commit) | .id' | head -n 1)
           
           if [ -z "${TEST_ID}" ]; then
@@ -133,12 +141,13 @@ jobs:
           fi
           
           if [ -z "${TEST_ID}" ]; then
+            echo "WARNING  | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | No test results found for module: ${REPO_NAME}"
             echo "status=no_tests" >> "$GITHUB_OUTPUT"
-            echo "message=No test results found for module: ${{ steps.repo.outputs.name }}" >> "$GITHUB_OUTPUT"
+            echo "message=No test results found for module: ${REPO_NAME}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           
-          echo "Found test ID: ${TEST_ID}"
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Found test ID: ${TEST_ID}"
           echo "test_id=${TEST_ID}" >> "$GITHUB_OUTPUT"
           
           # Wait for test to complete
@@ -153,6 +162,9 @@ jobs:
             MESSAGE=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes.message // "No message"')
             CREATED_AT=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["created-at"]')
             
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test status: ${STATUS}"
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test message: ${MESSAGE}"
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test created at: ${CREATED_AT}"
             echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
             echo "message=${MESSAGE}" >> "$GITHUB_OUTPUT"
             echo "created_at=${CREATED_AT}" >> "$GITHUB_OUTPUT"
@@ -162,10 +174,12 @@ jobs:
             PASSED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | map(select(.status == "passed")) | length')
             FAILED=$(echo "${TEST_DETAILS}" | jq -r '.data.attributes["test-runs"] // [] | map(select(.status == "failed")) | length')
             
+            echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test runs - Total: ${RUNS}, Passed: ${PASSED}, Failed: ${FAILED}"
             echo "total_runs=${RUNS}" >> "$GITHUB_OUTPUT"
             echo "passed_runs=${PASSED}" >> "$GITHUB_OUTPUT"
             echo "failed_runs=${FAILED}" >> "$GITHUB_OUTPUT"
           else
+            echo "ERROR    | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Test timeout"
             echo "status=timeout" >> "$GITHUB_OUTPUT"
             echo "message=Test did not complete within the timeout period" >> "$GITHUB_OUTPUT"
           fi
@@ -235,6 +249,7 @@ jobs:
           "
           
           # Post comment to PR
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Posting test results comment to PR"
           PR_COMMENTS_URL=$(jq -r ".pull_request.comments_url" "${GITHUB_EVENT_PATH}")
           
           curl -s -X POST \
@@ -243,6 +258,8 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg body "${COMMENT_BODY}" '{body: $body}')" \
             "${PR_COMMENTS_URL}"
+          
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Comment posted successfully"
 
       - name: Create PR Comment - No Tests Found
         if: steps.test.outputs.status == 'not_found' || steps.test.outputs.status == 'no_tests'
@@ -257,6 +274,7 @@ jobs:
           No test results were found for this module. Make sure the module is published to the private registry and has test runs configured.
           "
           
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Posting no tests found comment to PR"
           PR_COMMENTS_URL=$(jq -r ".pull_request.comments_url" "${GITHUB_EVENT_PATH}")
           
           curl -s -X POST \
@@ -265,3 +283,5 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg body "${COMMENT_BODY}" '{body: $body}')" \
             "${PR_COMMENTS_URL}"
+          
+          echo "INFO     | $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Comment posted successfully"
