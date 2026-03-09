@@ -190,4 +190,4 @@ resource "github_team_repository" "this" {
   permission = each.value.permission
 }
 
-# v0.0.9
+# v0.0.10
